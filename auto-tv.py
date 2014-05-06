@@ -1,43 +1,85 @@
 import xmltodict, datetime
 import requests
+from movie import Movie
+from genre import Genre
+from channel import Channel
+from tv import TV
+from collections import Counter
+import simplejson
+import time
 
-url = "http://192.168.1.72:32400/library/sections/1/all"
-#url = "http://localhost:32400/library/sections/1/all"
-
-r = requests.get(url)
+url = "http://192.168.1.72:32400"
+#url = "http://localhost:32400"
+r = requests.get(url+"/library/sections/1/all")
 
 if(r.status_code == 200):
+	#Request a list with all movies
 	data = xmltodict.parse(r.text)
-	movie = data['MediaContainer']['Video']
-	for mv in movie:
-		print "-----------------------------------"
-		print mv['@title']
-		if "@duration" in mv:
-			print " -> " + str(datetime.timedelta(seconds=int(mv['@duration'])/1000))
-		if '@rating' in mv:
-			print " -> " + (mv['@rating'])[:4] + "/10"
-		if '@year' in mv:
-			print " -> " + mv['@year']
-		if 'Genre' in mv:
-			print " -> Genre: "
-			for genreTags in mv['Genre']:
-				if isinstance(genreTags, dict):
-					for key, genre in genreTags.iteritems():
-						if key == "@tag":
-							print " ---> " + genre
-				elif isinstance(mv['Genre'], dict):
-					print " ---> " + mv['Genre']['@tag']
-		if 'Part' in mv['Media']:
-			if isinstance(mv['Media']['Part'], dict):
-				for key, string in mv['Media']['Part'].iteritems():
-					if key == "@key":
-						print string
-			else:
-				for partItem in mv['Media']['Part']:
-					for key, string in partItem.iteritems():
-						if key == "@key":
-							print string
-						
+	moviesData = data['MediaContainer']['Video']
+	movies = [];
+	for mv in moviesData:
+		# request metadata for each individual movie
+		movieMetadataRequest = requests.get(url+mv['@key'])
+		if movieMetadataRequest.status_code == 200:
+			data = xmltodict.parse(movieMetadataRequest.text)
+			movie = data['MediaContainer']['Video']
+			try:
+				newMovie = Movie(movie)
+				movies.append(newMovie)
+			except:
+				continue
+				#we do nothing, that means the movie is malformed
 
+	genres = []
+	# Reverse everything; we want to know how many movies each genre has
+	for mv in movies:
+		for genre in mv.genres:
+			found = False
+			for g in genres:
+				if genre == g.name:
+					g.addMovie(mv)
+					found = True
+			if not found:
+				newGenre = Genre(genre)
+				newGenre.addMovie(mv)
+				genres.append(newGenre)
+	
+	# Sort them by number of movies
+	genres = sorted(genres, key=lambda x: x.movieCount, reverse=True)
+		
+	# We build some channels from the 10 heaviest genres
+	channels = []
+	i=0
+	for genre in genres:
+		newChannel = Channel(genre.name)
+		for mv in genre.movies:
+			newChannel.addMovie(mv)
+		newChannel.buildSchedule(86400000)
+		channels.append(newChannel)
+		del genre
 
+		i+=1
+		if i > 10:
+			break
 
+	#Serialize the channels and write them to a json	
+	data = []
+	for channel in channels:
+		moviesData = []
+		for mv in channel.schedule:
+			moviesData.append(dict({
+				"title":mv.title,
+				"key":mv.key,
+				"duration":mv.duration
+			}))
+
+		data.append(dict({'channel':dict({
+				"channelName":channel.name,
+				"channelStarted":int(round(time.time() * 1000)),
+				"movies":moviesData
+			})}))
+
+	with open('channels.json', 'w') as f:
+		simplejson.dump(data, f)
+	
+	
